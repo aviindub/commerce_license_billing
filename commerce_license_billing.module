@@ -471,23 +471,11 @@ function commerce_license_billing_create_recurring_orders($order) {
   foreach ($order_wrapper->commerce_line_items as $line_item_wrapper) {
     // the line item has a commerce license
     if (!empty($line_item_wrapper->value()->commerce_license)) {
-      $product_wrapper = $line_item_wrapper->commerce_product;
       $billing_cycle_type_id = NULL;
       // line item's license has a billing cycle type
-      // this is the path we really want!!
       if (!empty($line_item_wrapper->commerce_license->value()->cl_billing_cycle_type)) {
         $billing_cycle_type_id = $line_item_wrapper->commerce_license->cl_billing_cycle_type->raw();
       }
-      /*
-      // line item's product has a billing cycle type
-      if (!empty($product_wrapper->value()->cl_billing_cycle_type)) {
-        $billing_cycle_type_id = $product_wrapper->cl_billing_cycle_type->raw();
-      }
-      // line item has a billing cycle type
-      if (!empty($line_item_wrapper->value()->cl_billing_cycle_type)) {
-        $billing_cycle_type_id = $line_item_wrapper->cl_billing_cycle_type->raw();
-      }
-       */
       if($billing_cycle_type_id != NULL) {
         $billing_cycle_type_ids[] = $billing_cycle_type_id;
         $grouped_licenses[$billing_cycle_type_id][] = $line_item_wrapper->commerce_license->value();
@@ -1892,8 +1880,7 @@ function commerce_license_billing_theme() {
 /**
  * Implements hook_commerce_line_item_presave().
  *
- * Ensures that each saved line item has a matching license with the
- * correct product id.
+ * Transfers the billing_type and billing_cycle_type values to the license
  */
 function commerce_license_billing_commerce_line_item_presave($line_item) {
   // This is not a license line item type, stop here.
