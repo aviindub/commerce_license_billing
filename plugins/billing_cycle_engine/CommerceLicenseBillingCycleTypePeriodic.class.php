@@ -5,6 +5,13 @@
  */
 class CommerceLicenseBillingCycleTypePeriodic extends CommerceLicenseBillingCycleTypeBase {
 
+  const PERIOD_ONE_DAY = '+1 day';
+  const PERIOD_ONE_WEEK = '+1 week';
+  const PERIOD_ONE_MONTH = '+1 month';
+  const PERIOD_THREE_MONTHS = '+3 month';
+  const PERIOD_SIX_MONTHS = '+6 month';
+  const PERIOD_ONE_YEAR = '+1 year';
+
   /**
    * Implements EntityBundlePluginProvideFieldsInterface::fields().
    */
@@ -15,10 +22,12 @@ class CommerceLicenseBillingCycleTypePeriodic extends CommerceLicenseBillingCycl
       'translatable' => '0',
       'settings' => array(
         'allowed_values' => array(
-          'day' => 'Day',
-          'week' => 'Week',
-          'month' => 'Month',
-          'year' => 'Year',
+          self::PERIOD_ONE_DAY => t('Day'),
+          self::PERIOD_ONE_WEEK => t('Week'),
+          self::PERIOD_ONE_MONTH => t('Month'),
+          self::PERIOD_THREE_MONTHS => t('Three Months'),
+          self::PERIOD_SIX_MONTHS => t('Six Months'),
+          self::PERIOD_ONE_YEAR => t('Year'),
         ),
       ),
     );
@@ -98,17 +107,12 @@ class CommerceLicenseBillingCycleTypePeriodic extends CommerceLicenseBillingCycl
           break;
       }
     }
+
     // Calculate the end timestamp.
-    $period_mapping = array(
-      'day' => '+1 day',
-      'week' => '+1 week',
-      'month' => '+1 month',
-      'year' => '+1 year',
-    );
-    // The 1 is substracted to make sure that the billing cycle ends 1s before
+    // The 1 is subtracted to make sure that the billing cycle ends 1s before
     // the next one starts (January 31st 23:59:59, for instance, with the
     // next one starting on February 1st 00:00:00).
-    $end = strtotime($period_mapping[$period], $start) - 1;
+    $end = strtotime($period, $start) - 1;
 
     // Try to find an existing billing cycle matching our parameters.
     $query = new EntityFieldQuery;

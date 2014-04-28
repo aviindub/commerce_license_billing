@@ -77,6 +77,13 @@ function commerce_license_billing_product_postpaid_condition($product) {
  * Rules condition callback: check if an order is elligible for recurring.
  */
 function commerce_license_billing_order_elligible_condition($order) {
+  //TODO:
+  /*
+  if (module_exists('commerce_coupon')) {
+    //check coupon related fields and return false if necessary
+  }
+  */
+
   // Prevent recursion.
   if ($order->type == 'recurring') {
     return FALSE;
@@ -86,6 +93,9 @@ function commerce_license_billing_order_elligible_condition($order) {
   $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
   foreach ($order_wrapper->commerce_line_items as $line_item_wrapper) {
     if (!empty($line_item_wrapper->commerce_license)) {
+      if (!empty($line_item_wrapper->value()->cl_billing_cycle_type)) {
+        return TRUE;
+      }
       $product = $line_item_wrapper->commerce_product->value();
       if (!empty($product->cl_billing_cycle_type)) {
         return TRUE;
