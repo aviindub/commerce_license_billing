@@ -10,7 +10,12 @@ class CommerceLicenseBillingGaugeUsageGroup extends CommerceLicenseBillingUsageG
   /**
    * Overrides CommerceLicenseBillingUsageBase::addUsage().
    */
-  public function addUsage($revisionId, $quantity, $start, $end = 0) {
+  public function addUsage($revisionId, $quantity, $start = NULL, $end = 0) {
+    if (is_null($start)) {
+      // Default $start to current time.
+      $start = commerce_license_get_time();
+    }
+
     // Close the previous usage.
     $previous_end = $start - 1;
     db_update('cl_billing_usage')
@@ -30,28 +35,49 @@ class CommerceLicenseBillingGaugeUsageGroup extends CommerceLicenseBillingUsageG
   /**
    * Implements CommerceLicenseBillingUsageGroupInterface::currentUsage().
    */
-  public function currentUsage() {
-    $data = array(
-      ':license_id' => $this->license->license_id,
-      ':group' => $this->groupName,
-    );
-    $usage = db_query("SELECT quantity FROM {cl_billing_usage}
-                    WHERE license_id = :license_id AND usage_group = :group
-                      ORDER BY start DESC, usage_id DESC LIMIT 1", $data)->fetchColumn();
+  public function currentUsage($billingCycle = NULL) {
+    if (is_null($billingCycle)) {
+      // Default to the current billing cycle.
+      $billingCycle = commerce_license_billing_get_license_billing_cycle($this->license);
+      if (!$billingCycle) {
+        // A billing cycle could not be found, possibly because the license
+        // hasn't been activated yet.
+        return 0;
+      }
+    }
 
-    return $usage;
+    // Get the quantity of the usage record with the highest usage_id
+    // for the current revision and billing cycle.
+    $current_usage = 0;
+    $previous_usage_id = 0;
+    $usage = $this->usageHistory($billingCycle);
+    foreach ($usage as $usage_record) {
+      if ($usage_record['revision_id'] == $this->license->revision_id) {
+        if ($usage_record['usage_id'] > $previous_usage_id) {
+          $current_usage = $usage_record['quantity'];
+          $previous_usage_id = $usage_record['usage_id'];
+        }
+      }
+    }
+
+    return $current_usage;
   }
 
   /**
    * Implements CommerceLicenseBillingUsageGroupInterface::chargeableUsage().
    */
   public function chargeableUsage(CommerceLicenseBillingCycle $billingCycle) {
+    if (!empty($this->groupInfo['not_charged'])) {
+      // This usage group shouldn't be charged.
+      return array();
+    }
+
     $usage = $this->usageHistory($billingCycle);
     $free_quantities = $this->freeQuantities($billingCycle);
     // Remove any usage that is free according to the active plan.
     foreach ($usage as $index => $usage_record) {
       $revision_id = $usage_record['revision_id'];
-      if ($usage_record['quantity'] <= $free_quantities[$revision_id]) {
+      if ($usage_record['quantity'] <= $free_quantities[$revision_id]['quantity']) {
         unset($usage[$index]);
       }
     }

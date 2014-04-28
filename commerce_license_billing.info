@@ -8,6 +8,8 @@ dependencies[] = commerce_license
 dependencies[] = commerce_order
 dependencies[] = date
 dependencies[] = list
+dependencies[] = views
+dependencies[] = views_megarow
 
 ; Classes includes
 files[] = commerce_license_billing.info.inc
@@ -15,6 +17,9 @@ files[] = plugins/billing_cycle_engine/base.inc
 files[] = includes/commerce_license_billing.interface.inc
 files[] = includes/commerce_license_billing.cycle_type_ui.inc
 files[] = includes/commerce_license_billing.cycle.inc
+
+; Views
+files[] = includes/views/handlers/commerce_license_billing_handler_field_usage_details.inc
 
 ; Tests
 files[] = tests/commerce_license_billing.test

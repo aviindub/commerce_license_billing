@@ -15,9 +15,10 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
   protected $billing_cycle_type = NULL;
   protected $billing_cycle = NULL;
   protected $prepaid_product = NULL;
+  protected $another_prepaid_product = NULL;
   protected $prepaid_product_display = NULL;
   protected $postpaid_product = NULL;
-  protected $alternative_postpaid_product = NULL;
+  protected $another_postpaid_product = NULL;
   protected $postpaid_product_display = NULL;
   protected $prepaid_license = NULL;
   protected $postpaid_license = NULL;
@@ -56,7 +57,7 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
     $this->billing_cycle = $billing_cycle_type->getBillingCycle($this->store_customer->uid);
 
     // Create a prepaid product that holds the license.
-    $this->prepaid_product = $this->createProduct('PREPAID-LICENSE', 50, 'prepaid');
+    $this->prepaid_product = $this->createProduct('PREPAID-LICENSE-PLAN-A', 50, 'prepaid');
     // Create a product display for the prepaid product.
     $node = (object) array('type' => 'product_display');
     node_object_prepare($node);
@@ -77,7 +78,8 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
     node_save($node);
     $this->postpaid_product_display = $node;
 
-    // Create another postpaid product that serves as an alternative plan.
+    // Create two more products to serve as alternative plans.
+    $this->another_prepaid_product = $this->createProduct('PREPAID-LICENSE-PLAN-B', 50, 'prepaid');
     $this->another_postpaid_product = $this->createProduct('POSTPAID-LICENSE-PLAN-B', 80, 'postpaid');
 
     $this->start = time();
@@ -116,6 +118,7 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
     $this->drupalGet($this->getCommerceUrl('cart'));
     $this->assertText($this->prepaid_product->title, 'The prepaid license product is present in the cart view');
     $this->assertText($this->postpaid_product->title, 'The postpaid license product is present in the cart view');
+    $this->assertText('$50.00', 'The prepaid license product is correctly priced at $50.00');
     $this->assertText('$0.00', 'The postpaid license product is correctly priced at $0.00');
 
     // Complete checkout
@@ -210,7 +213,7 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
   public function planTest() {
     // Forward time to the expected start of plan B.
     commerce_license_set_time($this->plan_durations[1][0]);
-    // Switch from plan A to plan B.
+    // Switch the postpaid license from plan A to plan B.
     $plan_b_product_id = $this->another_postpaid_product->product_id;
     commerce_license_billing_change_plan($this->postpaid_license, $plan_b_product_id);
     $plan_history = commerce_license_billing_plan_history_list($this->postpaid_license, $this->billing_cycle);
@@ -230,6 +233,19 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
     $this->assertTrue($second_record_valid, 'The second plan history record is valid');
     $first_record_closed = ($plan_history[0]['end'] + 1 == $plan_history[1]['start']);
     $this->assertTrue($first_record_closed, 'The first plan history record was successfuly closed');
+
+    // Schedule a plan change for the prepaid license.
+    $plan_b_product_id = $this->another_prepaid_product->product_id;
+    commerce_license_billing_change_plan($this->prepaid_license, $plan_b_product_id);
+    $scheduled_changes = commerce_license_billing_schedule_changes_list($this->prepaid_license);
+    $has_scheduled_change = FALSE;
+    if (count($scheduled_changes) == 1) {
+      $scheduled_change = reset($scheduled_changes);
+      if ($scheduled_change['property'] == 'product' && $scheduled_change['value'] == $plan_b_product_id) {
+        $has_scheduled_change = TRUE;
+      }
+    }
+    $this->assertTrue($has_scheduled_change, "The plan change for the prepaid license was successfuly scheduled.");
   }
 
   /**
@@ -248,15 +264,21 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
     $bandwidth->addUsage($this->prepaid_license->revision_id, 2050, $first_usage_start, $first_usage_end);
     $bandwidth->addUsage($this->prepaid_license->revision_id, 1022, $second_usage_start, $second_usage_end);
     // Confirm the correct current usage.
-    $current_usage = $bandwidth->currentUsage();
+    $current_usage = $bandwidth->currentUsage($this->billing_cycle);
     $this->assertEqual($current_usage, 3072, 'Current bandwidth usage matches total reported quantity');
+
+    // Set initial bandwidth usage for the postpaid license, so that it shows
+    // up as a line item in orderRefreshTest().
+    $plan_history = commerce_license_billing_plan_history_list($this->postpaid_license, $this->billing_cycle);
+    $bandwidth = commerce_license_billing_usage_group($this->postpaid_license, 'bandwidth');
+    $bandwidth->addUsage($plan_history[0]['revision_id'], 2050, $first_usage_start, $first_usage_end);
 
     // Forward time to expected start of plan B.
     commerce_license_set_time($this->plan_durations[1][0]);
 
     // Confirm that the environments gauge has the correct initial value.
     $environments = commerce_license_billing_usage_group($this->postpaid_license, 'environments');
-    $initial_usage = (int) $environments->currentUsage();
+    $initial_usage = (int) $environments->currentUsage($this->billing_cycle);
     $this->assertTrue($initial_usage === 2, 'The initial environment usage was successfuly opened.');
     // Register new usage for the second plan.
     $environments->addUsage($plan_history[1]['revision_id'], 4, $second_usage_start);
@@ -266,7 +288,7 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
     $first_record_closed = ($usage_history[1]['end'] + 1 == $usage_history[2]['start']);
     $this->assertTrue($first_record_closed, 'The first environment usage history record was successfuly closed');
     // Confirm the correct current usage.
-    $current_usage = $environments->currentUsage();
+    $current_usage = $environments->currentUsage($this->billing_cycle);
     $this->assertEqual($current_usage, 4, 'Current environment usage matches last reported quantity');
   }
 
@@ -278,57 +300,77 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
     $recurring_order = $this->getBillingCycleOrder($this->billing_cycle);
     // Build an array of expected line items.
     $next_billing_cycle = $this->billing_cycle_type->getNextBillingCycle($this->billing_cycle);
-    $expected_line_items = array();
-    // The prepaid product.
-    $expected_line_items[] = array(
+    $expected_charges = array();
+    $expected_charges[0] = array(
       'title' => 'prepaid base product',
       'product_id' => $this->prepaid_product->product_id,
-      'unit_price' => $this->prepaid_product->commerce_price[LANGUAGE_NONE][0]['amount'],
+      'commerce_unit_price' => array(
+        'amount' => $this->prepaid_product->commerce_price[LANGUAGE_NONE][0]['amount'],
+      ),
       'quantity' => 1,
-      'start' => $next_billing_cycle->start,
-      'end' => $next_billing_cycle->end,
+      'cl_billing_start' => $next_billing_cycle->start,
+      'cl_billing_end' => $next_billing_cycle->end,
     );
-    // The counter usage.
     $counter_product = commerce_product_load_by_sku('BILLING-TEST-BANDWIDTH');
-    $expected_line_items[] = array(
-      'title' => 'counter usage product',
+    $expected_charges[1] = array(
+      'title' => 'bandwidth usage product (prepaid)',
       'product_id' => $counter_product->product_id,
-      'unit_price' => $counter_product->commerce_price[LANGUAGE_NONE][0]['amount'],
+      'commerce_unit_price' => array(
+        'amount' => $counter_product->commerce_price[LANGUAGE_NONE][0]['amount'],
+      ),
       // 1024 is free, the rest is charged for.
       'quantity' => 2048,
-      'start' => $this->billing_cycle->start,
-      'end' => $this->billing_cycle->end,
+      'cl_billing_start' => $this->billing_cycle->start,
+      'cl_billing_end' => $this->billing_cycle->end,
+      'prorate' => TRUE,
     );
-    // The plans of the postpaid product.
-    $expected_line_items[] = array(
+    $expected_charges[2] = array(
       'title' => 'postpaid base product (plan A)',
       'product_id' => $this->postpaid_product->product_id,
-      'unit_price' => '1000', // 10$
+      'commerce_unit_price' => array(
+        'amount' => '1000', // 10$
+      ),
       'quantity' => 1,
-      'start' => $plan_durations[0][0],
-      'end' => $plan_durations[0][1],
+      'cl_billing_start' => $plan_durations[0][0],
+      'cl_billing_end' => $plan_durations[0][1],
     );
     // The second plan hasn't been closed yet, so it's taking 3/4 of the cycle.
-    $expected_line_items[] = array(
+    $expected_charges[3] = array(
       'title' => 'postpaid base product (plan B)',
       'product_id' => $this->another_postpaid_product->product_id,
-      'unit_price' => '6000', // 60$
+      'commerce_unit_price' => array(
+        'amount' => '6000', // 60$
+      ),
       'quantity' => 1,
-      'start' => $plan_durations[1][0],
-      'end' => $this->billing_cycle->end,
+      'cl_billing_start' => $plan_durations[1][0],
+      'cl_billing_end' => $this->billing_cycle->end,
+    );
+    $expected_charges[4] = array(
+      'title' => 'bandwidth usage product (postpaid)',
+      'product_id' => $counter_product->product_id,
+      'commerce_unit_price' => array(
+        'amount' => $counter_product->commerce_price[LANGUAGE_NONE][0]['amount'],
+      ),
+      // The free quantity is 1024, prorated to 256 since this usage only
+      // covers a quarter of the billing cycle. 2050 - 256 = 1794.
+      'quantity' => 1794,
+      'cl_billing_start' => $this->billing_cycle->start,
+      'cl_billing_end' => $this->billing_cycle->end,
     );
     $env_product = commerce_product_load_by_sku('BILLING-TEST-ENV');
     // 7.50$ is the expected unit price because at this moment the environment
     // usage is valid for 3/4 of the cycle, so it's 10$ * (3/4).
-    $expected_line_items[] = array(
-      'title' => 'environments usage product for plan B',
+    $expected_charges[5] = array(
+      'title' => 'environments usage product (postpaid, plan B)',
       'product_id' => $env_product->product_id,
-      'unit_price' => '750', // 7.50$
+      'commerce_unit_price' => array(
+        'amount' => '750', // 7.50$
+      ),
       'quantity' => 4,
-      'start' => $plan_durations[1][0],
-      'end' => $this->billing_cycle->end,
+      'cl_billing_start' => $plan_durations[1][0],
+      'cl_billing_end' => $this->billing_cycle->end,
     );
-    $this->assertLineItems($recurring_order, $expected_line_items);
+    $this->assertLineItems($recurring_order, $expected_charges);
 
     // Forward time to the expected suspension start, and then do it.
     commerce_license_set_time($this->plan_durations[2][0]);
@@ -339,7 +381,7 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
     $suspended_revision_id = $this->postpaid_license->revision_id;
     $environments = commerce_license_billing_usage_group($this->postpaid_license, 'environments');
     try {
-      $environments->addUsage($suspended_revision_id, 4, REQUEST_TIME);
+      $environments->addUsage($suspended_revision_id, 4);
     }
     catch (Exception $e) {
       $message = $e->getMessage();
@@ -357,76 +399,135 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
 
     // The previous active revision went from 3/4 to 1/4 of the billing cycle
     // so the expected price needs to change.
-    $expected_line_items[3]['end'] = $plan_durations[1][1];
-    $expected_line_items[3]['unit_price'] = '4000'; // 40$.
-    // Remove the old env usage, it will be readded.
-    unset($expected_line_items[4]);
+    $expected_charges[3]['cl_billing_end'] = $plan_durations[1][1];
+    $expected_charges[3]['commerce_unit_price']['amount'] = '4000'; // 40$.
+    // Remove the old usage, it will be readded.
+    unset($expected_charges[4]);
+    unset($expected_charges[5]);
     // Add the new active plan.
-    $expected_line_items[] = array(
+    $expected_charges[4] = array(
       'title' => 'postpaid base product (plan B)',
       'product_id' => $this->another_postpaid_product->product_id,
-      'unit_price' => '1000', // 10$
+      'commerce_unit_price' => array(
+        'amount' => '1000', // 10$
+      ),
       'quantity' => 1,
-      'start' => $plan_durations[3][0],
-      'end' => $this->billing_cycle->end,
+      'cl_billing_start' => $plan_durations[3][0],
+      'cl_billing_end' => $this->billing_cycle->end,
     );
-    $expected_line_items[] = array(
-      'title' => 'environments usage product (plan B)',
+    $expected_charges[5] = array(
+      'title' => 'bandwidth usage product (postpaid)',
+      'product_id' => $counter_product->product_id,
+      'commerce_unit_price' => array(
+        'amount' => $counter_product->commerce_price[LANGUAGE_NONE][0]['amount'],
+      ),
+      // The free quantity is 1024, prorated to 256 since this usage only
+      // covers a quarter of the billing cycle. 2050 - 256 = 1794.
+      'quantity' => 1794,
+      'cl_billing_start' => $this->billing_cycle->start,
+      'cl_billing_end' => $this->billing_cycle->end,
+    );
+    $expected_charges[6] = array(
+      'title' => 'environments usage product (postpaid, plan B)',
       'product_id' => $env_product->product_id,
-      'unit_price' => '500', // 5$
+      'commerce_unit_price' => array(
+        'amount' => '500', // 5$
+      ),
       'quantity' => 4,
-      'start' => $plan_durations[1][0],
-      'end' => $plan_durations[1][1],
+      'cl_billing_start' => $plan_durations[1][0],
+      'cl_billing_end' => $plan_durations[1][1],
     );
-    $expected_line_items[] = array(
-      'title' => 'environments usage product (plan B, reactivated)',
+    $expected_charges[7] = array(
+      'title' => 'environments usage product (postpaid, plan B, reactivated)',
       'product_id' => $env_product->product_id,
-      'unit_price' => '125', // 1.25$
+      'commerce_unit_price' => array(
+        'amount' => '125', // 1.25$
+      ),
       'quantity' => 4,
-      'start' => $plan_durations[3][0],
-      'end' => $this->billing_cycle->end,
+      'cl_billing_start' => $plan_durations[3][0],
+      'cl_billing_end' => $this->billing_cycle->end,
     );
-    $expected_line_items = array_values($expected_line_items);
+    $expected_charges = array_values($expected_charges);
 
     // Reload the order and re-examine the line items.
     entity_get_controller('commerce_order')->resetCache();
     drupal_static_reset('commerce_license_billing_commerce_order_load');
     $recurring_order = commerce_order_load($recurring_order->order_id);
-    $this->assertLineItems($recurring_order, $expected_line_items);
+    $this->assertLineItems($recurring_order, $expected_charges);
+    $order_wrapper = entity_metadata_wrapper('commerce_order', $recurring_order);
+
+    // Confirm that the order total is correct.
+    $order_total = $order_wrapper->commerce_order_total->amount->value();
+    $expected_order_total = $this->getExpectedOrderTotal($expected_charges);
+    $this->assertEqual($order_total, $expected_order_total, "The recurring order has the expected total.");
+
+    // Store the old line item ids for later comparison.
+    $old_line_item_ids = array();
+    foreach ($order_wrapper->commerce_line_items as $line_item_wrapper) {
+      $old_line_item_ids[] = $line_item_wrapper->raw();
+    }
+
+    // Increase the bandwidth product price from $0.1 to $1.
+    $counter_product->commerce_price[LANGUAGE_NONE][0]['amount'] = '100';
+    commerce_product_save($counter_product);
+    $expected_charges[1]['commerce_unit_price']['amount'] = 100;
+    $expected_charges[5]['commerce_unit_price']['amount'] = 100;
+    // Confirm that the line items have changed. This ensures that the
+    // order refresh works properly when no new line items were created.
+    entity_get_controller('commerce_order')->resetCache();
+    drupal_static_reset('commerce_license_billing_commerce_order_load');
+    $recurring_order = commerce_order_load($recurring_order->order_id);
+    $this->assertLineItems($recurring_order, $expected_charges);
+    $order_wrapper = entity_metadata_wrapper('commerce_order', $recurring_order);
+
+    // Confirm that the order total has been updated.
+    $order_total = $order_wrapper->commerce_order_total->amount->value();
+    $expected_order_total = $this->getExpectedOrderTotal($expected_charges);
+    $this->assertEqual($order_total, $expected_order_total, "The recurring order has the expected total.");
+
+    // Confirm that the old line items were updated, without creating new ones.
+    $new_line_item_ids = array();
+    foreach ($order_wrapper->commerce_line_items as $line_item_wrapper) {
+      $new_line_item_ids[] = $line_item_wrapper->raw();
+    }
+    $same = ($old_line_item_ids == $new_line_item_ids);
+    $this->assertTrue($same, 'The previous line items have been successfully updated.');
   }
 
   /**
    * Tests the closing of a billing cycle.
    */
   protected function billingCycleCloseTest() {
+    commerce_license_set_time($this->billing_cycle->end);
     // Call the queue item manually.
     $item = new stdClass;
     $item->data = array();
     $item->data['billing_cycle_id'] = $this->billing_cycle->billing_cycle_id;
-    commerce_license_billing_cycle_expiration_queue_process($item);
+    commerce_license_billing_cycle_close_queue_process($item);
 
     // The order hasn't been closed because of missing usage reports.
     $recurring_order = $this->getBillingCycleOrder($this->billing_cycle);
     $usage_pending = ($recurring_order->status == 'recurring_usage_pending');
     $this->assertTrue($usage_pending, "The billing cycle hasn't been closed because of pending usage");
 
-    // Add missing badwidth usage for the last active plan.
+    // Add missing badwidth usage for the postpaid license.
     $plan_history = commerce_license_billing_plan_history_list($this->postpaid_license, $this->billing_cycle);
     $bandwidth = commerce_license_billing_usage_group($this->postpaid_license, 'bandwidth');
-    $bandwidth->addUsage($plan_history[0]['revision_id'], 2050, $plan_history[0]['start'], $plan_history[0]['end']);
     $bandwidth->addUsage($plan_history[1]['revision_id'], 1022, $plan_history[1]['start'], $plan_history[1]['end']);
+    $bandwidth->addUsage($plan_history[2]['revision_id'], 0, $plan_history[2]['start'], $plan_history[2]['end']);
 
     // Retrigger the close, reload the order and re-examine it.
     entity_get_controller('commerce_order')->resetCache();
-    commerce_license_billing_cycle_expiration_queue_process($item);
-
-    $recurring_order = commerce_order_load($recurring_order->order_id);
-    $payment_pending = ($recurring_order->status == 'recurring_payment_pending');
-    $this->assertTrue($payment_pending, 'The order is now awaiting payment, as expected.');
+    commerce_license_billing_cycle_close_queue_process($item);
 
     $this->billing_cycle = entity_load_single('cl_billing_cycle', $this->billing_cycle->billing_cycle_id);
     $billing_cycle_closed = ($this->billing_cycle->status == 0);
     $this->assertTrue($billing_cycle_closed, 'The previous billing cycle was successfully closed');
+    $recurring_order = commerce_order_load($recurring_order->order_id);
+    $payment_pending = ($recurring_order->status == 'recurring_payment_pending');
+    $this->assertTrue($payment_pending, 'The order is now awaiting payment, as expected.');
+
+    commerce_license_billing_cycle_renew_queue_process($item);
     $expected_start = $this->billing_cycle->end + 1;
     // Try to find the new billing cycle.
     $query = new EntityFieldQuery;
@@ -439,11 +540,8 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
       $billing_cycle_id = key($result['cl_billing_cycle']);
       $new_billing_cycle = entity_load_single('cl_billing_cycle', $billing_cycle_id);
       $new_recurring_order = $this->getBillingCycleOrder($new_billing_cycle);
-      $opened_new_order = FALSE;
-      if ($new_recurring_order && $new_recurring_order->status == 'recurring_open') {
-        $opened_new_order = TRUE;
-      }
-      $this->assertTrue($opened_new_order, 'A new recurring order was successfuly opened').
+      $opened_new_order = ($new_recurring_order && $new_recurring_order->status == 'recurring_open');
+      $this->assertTrue($opened_new_order, 'A new recurring order was successfuly opened');
 
       $licenses = commerce_license_billing_get_recurring_order_licenses($new_recurring_order);
       $licenses_renewed = (count($licenses) == 2);
@@ -452,14 +550,49 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
         if ($license->expires != $new_billing_cycle->end) {
           $licenses_renewed = FALSE;
         }
-        $bandwidth_usage = commerce_license_billing_usage_group($license, 'bandwidth')->currentUsage();
+        $bandwidth_usage = commerce_license_billing_usage_group($license, 'bandwidth')->currentUsage($this->billing_cycle);
         if ($bandwidth_usage != 0) {
           $bandwidth_usage_reset = FALSE;
         }
       }
       $this->assertTrue($licenses_renewed, 'The licenses have been successfully renewed');
       $this->assertTrue($bandwidth_usage_reset, 'The bandwidth usage has been successfully reset.');
+
+      // Reload the prepaid license and confirm the plan change.
+      $this->prepaid_license = entity_load_single('commerce_license', $this->prepaid_license->license_id);
+      $changed_plan = ($this->prepaid_license->product_id == $this->another_prepaid_product->product_id);
+      $this->assertTrue($changed_plan, "The scheduled plan change for the prepaid license has been executed.");
     }
+
+    // Go to the end of the second billing cycle, register usage.
+    commerce_license_set_time($new_billing_cycle->end + 1);
+    $bandwidth = commerce_license_billing_usage_group($this->prepaid_license, 'bandwidth');
+    $bandwidth->addUsage($this->prepaid_license->revision_id, 0, $new_billing_cycle->start, $new_billing_cycle->end);
+    $bandwidth = commerce_license_billing_usage_group($this->postpaid_license, 'bandwidth');
+    $bandwidth->addUsage($this->postpaid_license->revision_id, 0, $new_billing_cycle->start, $new_billing_cycle->end);
+
+    // Cancel all licenses.
+    foreach ($licenses as $license) {
+      $license->status = COMMERCE_LICENSE_REVOKED;
+      $license->save();
+    }
+
+    // Close the second biling cycle.
+    $item = new stdClass;
+    $item->data = array();
+    $item->data['billing_cycle_id'] = $new_billing_cycle->billing_cycle_id;
+    commerce_license_billing_cycle_renew_queue_process($item);
+    commerce_license_billing_cycle_close_queue_process($item);
+
+    $new_billing_cycle = entity_load_single('cl_billing_cycle', $new_billing_cycle->billing_cycle_id);
+    // Confirm that no new billing cycle was opened.
+    $expected_start = $new_billing_cycle->end + 1;
+    $query = new EntityFieldQuery;
+    $query
+      ->entityCondition('entity_type', 'cl_billing_cycle')
+      ->propertyCondition('start', $expected_start);
+    $result = $query->execute();
+    $this->assertFalse($result, 'A new billing cycle was not opened');
   }
 
   /**
@@ -591,7 +724,6 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
     );
     $this->drupalPost(NULL, $info, 'Continue to next step');
     $this->drupalPost(NULL, array(), 'Continue to next step');
-    $this->drupalPost(NULL, array('commerce_payment[payment_details][name]' => 'Example payment method'), 'Continue to next step');
     $this->assertTitle('Checkout complete' . ' | Drupal', 'Checkout has been completed');
   }
 
@@ -600,23 +732,46 @@ class CommerceLicenseBillingTestCase extends CommerceBaseTestCase {
    *
    * @param $order
    *   The order entity
-   * @param $expected_line_items
-   *   An array of arrays with the title, product_id, price, start, end keys.
+   * @param $expected_charges
+   *   The expected charges.
    */
-  protected function assertLineItems($order, $expected_line_items) {
+  protected function assertLineItems($order, $expected_charges) {
     $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
-    foreach ($expected_line_items as $index => $expected_line_item) {
-      $match = FALSE;
+    foreach ($expected_charges as $index => $expected_charge) {
+      $match_found = FALSE;
       if (isset($order_wrapper->commerce_line_items[$index])) {
         $wrapper = $order_wrapper->commerce_line_items[$index];
-        $product_matches = ($wrapper->commerce_product->raw() == $expected_line_item['product_id']);
-        $price_matches = ($wrapper->commerce_unit_price->amount->value() == $expected_line_item['unit_price']);
-        $quantity_matches = ($wrapper->quantity->value() == $expected_line_item['quantity']);
-        $start_matches = ($wrapper->cl_billing_start->value() == $expected_line_item['start']);
-        $end_matches = ($wrapper->cl_billing_end->value() == $expected_line_item['end']);
-        $match = ($product_matches && $price_matches && $quantity_matches && $start_matches && $end_matches);
+        $match = array();
+        $match['product'] = ($wrapper->commerce_product->raw() == $expected_charge['product_id']);
+        $match['price'] = ($wrapper->commerce_unit_price->amount->value() == $expected_charge['commerce_unit_price']['amount']);
+        $match['quantity'] = ($wrapper->quantity->value() == $expected_charge['quantity']);
+        $match['start'] = ($wrapper->cl_billing_start->value() == $expected_charge['cl_billing_start']);
+        $match['end'] = ($wrapper->cl_billing_end->value() == $expected_charge['cl_billing_end']);
+        $matching = array_filter($match);
+        $non_matching = array_diff($match, $matching);
+        $match_found = (count($non_matching) == 0);
+        if ($non_matching) {
+          debug($non_matching, 'Non-matching');
+          debug($wrapper->value());
+        }
       }
-      $this->assertTrue($match, 'Found valid matching line item for ' . $expected_line_item['title']);
+      $this->assertTrue($match_found, 'Found valid matching line item for ' . $expected_charge['title']);
     }
+  }
+
+  /**
+   * Calculates the expected order total based on the expected charges.
+   *
+   * @param $expected_charges
+   *   The expected charges.
+   */
+  protected function getExpectedOrderTotal($expected_charges) {
+    // Add them up.
+    $total = 0;
+    foreach ($expected_charges as $index => $expected_charge) {
+      $total += $expected_charge['commerce_unit_price']['amount'] * $expected_charge['quantity'];
+    }
+
+    return $total;
   }
 }

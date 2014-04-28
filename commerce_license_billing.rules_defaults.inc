@@ -6,6 +6,27 @@
  */
 
 /**
+ * Implements hook_default_rules_configuration_alter().
+ */
+function commerce_license_billing_default_rules_configuration_alter(&$configs) {
+  // The order account rules run at commerce_checkout_complete, which is usually
+  // after commerce_payment_order_paid_in_full. This means that if the checkout
+  // was anonymous, a recurring order can't be opened because the order owner
+  // is not yet known. Until this is fixed in Commerce, this module needs to
+  // ensure that these rules run at commerce_payment_order_paid_in_full as well.
+  $configuration_names = array(
+    'commerce_checkout_order_convert',
+    'commerce_checkout_new_account',
+  );
+
+  foreach ($configuration_names as $configuration_name) {
+    if (isset($configs[$configuration_name])) {
+      $configs[$configuration_name]->event('commerce_payment_order_paid_in_full');
+    }
+  }
+}
+
+/**
  * Implements hook_default_rules_configuration().
  */
 function commerce_license_billing_default_rules_configuration() {
@@ -13,9 +34,16 @@ function commerce_license_billing_default_rules_configuration() {
   $items['commerce_license_billing_set_postpaid_product_price'] = entity_import('rules_config', '{ "commerce_license_billing_set_postpaid_product_price" : {
       "LABEL" : "Set the price of postpaid products to 0",
       "PLUGIN" : "reaction rule",
+      "WEIGHT" : "-5",
+      "OWNER" : "rules",
       "TAGS" : [ "Commerce License Billing" ],
-      "REQUIRES" : [ "rules", "commerce_license_billing", "commerce_product_reference" ],
-      "ON" : [ "commerce_product_calculate_sell_price" ],
+      "REQUIRES" : [
+        "rules",
+        "commerce_license_billing",
+        "commerce_line_item",
+        "commerce_product_reference"
+      ],
+      "ON" : { "commerce_product_calculate_sell_price" : [] },
       "IF" : [
         { "NOT entity_is_of_bundle" : {
             "entity" : [ "commerce-line-item" ],
@@ -24,7 +52,17 @@ function commerce_license_billing_default_rules_configuration() {
           }
         },
         { "entity_has_field" : { "entity" : [ "commerce-line-item" ], "field" : "commerce_product" } },
-        { "commerce_license_billing_product_is_postpaid" : { "commerce_product" : [ "commerce-line-item:commerce-product" ] } }
+        { "entity_has_field" : {
+            "entity" : [ "commerce-line-item:commerce-product" ],
+            "field" : "cl_billing_type"
+          }
+        },
+        { "commerce_license_billing_product_elligible" : { "commerce_product" : [ "commerce-line-item:commerce-product" ] } },
+        { "data_is" : {
+            "data" : [ "commerce-line-item:commerce-product:cl-billing-type" ],
+            "value" : "postpaid"
+          }
+        }
       ],
       "DO" : [
         { "commerce_line_item_unit_price_amount" : {
@@ -34,6 +72,54 @@ function commerce_license_billing_default_rules_configuration() {
             "round_mode" : "0"
           }
         }
+      ]
+    }
+  }');
+  $items['commerce_license_billing_prorate_prepaid_product_price'] = entity_import('rules_config', '{ "commerce_license_billing_prorate_prepaid_product_price" : {
+      "LABEL" : "Prorate the price of prepaid products",
+      "PLUGIN" : "reaction rule",
+      "WEIGHT" : "-5",
+      "OWNER" : "rules",
+      "TAGS" : [ "Commerce License Billing" ],
+      "REQUIRES" : [ "rules", "commerce_license_billing", "commerce_product_reference" ],
+      "ON" : { "commerce_product_calculate_sell_price" : [] },
+      "IF" : [
+        { "NOT entity_is_of_bundle" : {
+            "entity" : [ "commerce-line-item" ],
+            "type" : "commerce_line_item",
+            "bundle" : { "value" : { "recurring" : "recurring" } }
+          }
+        },
+        { "entity_has_field" : { "entity" : [ "commerce-line-item" ], "field" : "commerce_product" } },
+        { "commerce_license_billing_product_elligible" : { "commerce_product" : [ "commerce-line-item:commerce-product" ] } },
+        { "entity_has_field" : {
+            "entity" : [ "commerce-line-item:commerce-product" ],
+            "field" : "cl_billing_type"
+          }
+        },
+        { "data_is" : {
+            "data" : [ "commerce-line-item:commerce-product:cl-billing-type" ],
+            "value" : "prepaid"
+          }
+        },
+        { "entity_has_field" : {
+            "entity" : [ "commerce-line-item:commerce-product" ],
+            "field" : "cl_billing_cycle_type"
+          }
+        },
+        { "entity_has_field" : {
+            "entity" : [ "commerce-line-item:commerce-product:cl-billing-cycle-type" ],
+            "field" : "pce_async"
+          }
+        },
+        { "data_is" : {
+            "data" : [ "commerce-line-item:commerce-product:cl-billing-cycle-type:pce-async" ],
+            "value" : 0
+          }
+        }
+      ],
+      "DO" : [
+        { "commerce_license_billing_prorate_line_item" : { "commerce_line_item" : [ "commerce_line_item" ] } }
       ]
     }
   }');
@@ -93,6 +179,22 @@ function commerce_license_billing_default_rules_configuration() {
                 "card_data" : [ "" ]
               },
               "PROVIDE" : { "charge_card_response" : { "charge_card_response" : "charge Card Response" } }
+            }
+          }
+        ]
+      }
+    }');
+    $items['rules_commerce_license_billing_update_order_charged'] = entity_import('rules_config', '{ "rules_commerce_license_billing_update_order_charged" : {
+        "LABEL" : "Update status of successfully charged recurring order",
+        "PLUGIN" : "reaction rule",
+        "WEIGHT" : "11",
+        "TAGS" : [ "Commerce License Billing" ],
+        "REQUIRES" : [ "commerce_order", "commerce_cardonfile" ],
+        "ON" : [ "commerce_cardonfile_charge_success" ],
+        "DO" : [
+          { "commerce_order_update_status" : {
+              "commerce_order" : [ "order" ],
+              "order_status" : "completed"
             }
           }
         ]

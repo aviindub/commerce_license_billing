@@ -1,7 +1,7 @@
 <?php
 
 /**
- * A perodic billing cycle engine API.
+ * A periodic billing cycle engine API.
  */
 class CommerceLicenseBillingCycleTypePeriodic extends CommerceLicenseBillingCycleTypeBase {
 
@@ -90,6 +90,13 @@ class CommerceLicenseBillingCycleTypePeriodic extends CommerceLicenseBillingCycl
     if (!$this->wrapper->pce_async->value()) {
       // This is a synchronous billing cycle, normalize the start timestamp.
       switch ($period) {
+        case 'hour':
+          $day = date('d', $start);
+          $month = date('m', $start);
+          $year = date('Y', $start);
+          $hour = date('H', $start);
+          $start = mktime($hour, 0, 0, $month, $day, $year);
+          break;
         case 'day':
           $start = strtotime('today');
           break;
@@ -101,6 +108,29 @@ class CommerceLicenseBillingCycleTypePeriodic extends CommerceLicenseBillingCycl
           break;
         case 'month':
           $start = strtotime(date('F Y', $start));
+          break;
+        case 'quarter':
+          $year = date('Y', $start);
+          $dates = array(
+            mktime(0, 0, 0, 1, 1, $year), // january 1st
+            mktime(0, 0, 0, 4, 1, $year), // april 1st,
+            mktime(0, 0, 0, 7, 1, $year), // july 1st
+            mktime(0, 0, 0, 10, 1, $year), // october 1st,
+            mktime(0, 0, 0, 1, 1, $year + 1),
+          );
+
+          foreach ($dates as $index => $date) {
+            if ($start >= $date && $start < $dates[$index + 1]) {
+              $start = $date;
+              break;
+            }
+          }
+          break;
+        case 'half-year':
+          $year = date('Y', $start);
+          $january1st = mktime(0, 0, 0, 1, 1, $year);
+          $july1st = mktime(0, 0, 0, 7, 1, $year);
+          $start = ($start < $july1st) ? $january1st : $july1st;
           break;
         case 'year':
           $start = mktime(0, 0, 0, 1, 1, date('Y', $start) + 1);
@@ -163,7 +193,7 @@ class CommerceLicenseBillingCycleTypePeriodic extends CommerceLicenseBillingCycl
    * Returns a label for a billing cycle with the provided start and end.
    *
    * @param $start
-   *   The unix timestmap when the billing cycle starts.
+   *   The unix timestamap when the billing cycle starts.
    * @param $end
    *   The unix timestamp when the billing cycle ends.
    *

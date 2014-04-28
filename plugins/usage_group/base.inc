@@ -6,6 +6,21 @@
 interface CommerceLicenseBillingUsageGroupInterface {
 
   /**
+   * Enforces change scheduling for the given license property.
+   *
+   * This means that any change to the given property ("status", for example)
+   * must be scheduled for the end of the billing cycle, so that it doesn't
+   * interfere with billing.
+   *
+   * @param $property
+   *   The license property that will be changed, usually "product" or "status".
+   *
+   * @return
+   *   TRUE if changes to the given property must be scheduled, FALSE otherwise.
+   */
+  public function enforceChangeScheduling($property);
+
+  /**
    * Adds a usage record for the given license revision.
    *
    * @param $revisionId
@@ -21,34 +36,38 @@ interface CommerceLicenseBillingUsageGroupInterface {
   public function addUsage($revisionId, $quantity, $start, $end);
 
   /**
-   * Returns the current usage quantity.
-   */
-  public function currentUsage();
-
-  /**
-   * Returns the usage history for the current billing cycle.
+   * Returns the usage quantity for the provided / current billing cycle.
    *
    * @param $billing_cycle
-   *   The billing cycle entity.
+   *   The billing cycle for which usage should be returned.
+   *   If not provided, the current billing cycle is assumed.
+   */
+  public function currentUsage($billingCycle = NULL);
+
+  /**
+   * Returns the usage history for the provided billing cycle.
+   *
+   * @param $billing_cycle
+   *   The billing cycle.
    */
   public function usageHistory(CommerceLicenseBillingCycle $billingCycle);
 
   /**
-   * Returns the chargeable usage records for the current billing cycle.
+   * Returns the chargeable usage records for the provided billing cycle.
    *
    * @param $billing_cycle
-   *   The billing cycle entity.
+   *   The billing cycle.
    */
   public function chargeableUsage(CommerceLicenseBillingCycle $billingCycle);
 
   /**
-   * Returns whether all usage has been reported for the current billing cycle.
+   * Returns whether all usage has been reported for the provided billing cycle.
    *
    * @param $billing_cycle
-   *   The active billing cycle.
+   *   The billing cycle.
    *
    * @return
-   *   TRUE if all usage has been reported for each plan in the current
+   *   TRUE if all usage has been reported for each plan in the provided
    *   billing cycle, FALSE otherwise.
    */
   public function isComplete(CommerceLicenseBillingCycle $billingCycle);
@@ -105,6 +124,13 @@ abstract class CommerceLicenseBillingUsageGroupBase implements CommerceLicenseBi
   }
 
   /**
+   * Implements CommerceLicenseBillingUsageGroupInterface::enforceChangeScheduling().
+   */
+  public function enforceChangeScheduling($property) {
+    return FALSE;
+  }
+
+  /**
    * Implements CommerceLicenseBillingUsageGroupInterface::addUsage().
    */
   public function addUsage($revisionId, $quantity, $start, $end) {
@@ -144,22 +170,22 @@ abstract class CommerceLicenseBillingUsageGroupBase implements CommerceLicenseBi
    * Implements CommerceLicenseBillingUsageGroupInterface::isComplete().
    */
   public function isComplete(CommerceLicenseBillingCycle $billingCycle) {
+    // If the usage records are complete, then the sum of their durations
+    // will be the same as the sum of plan durations.
+    // Every plan or usage record ends a second before the next one, so
+    // the equation needs to add 1s to each record to get the correct duration.
     $plan_history = commerce_license_billing_plan_history_list($this->license, $billingCycle);
-    $is_complete = TRUE;
+    $plan_duration = 0;
     foreach ($plan_history as $history_record) {
-      $usage_history = $this->usageHistory($billingCycle);
-      $remaining_gap = ($history_record['end'] - $history_record['start']);
-      foreach ($usage_history as $usage_record) {
-        $remaining_gap -= ($usage_record['end'] - $usage_record['start'] + 1);
-      }
-
-      if ($remaining_gap > 0) {
-        $is_complete = FALSE;
-        break;
-      }
+      $plan_duration += ($history_record['end'] - $history_record['start'] + 1);
+    }
+    $usage_history = $this->usageHistory($billingCycle);
+    $usage_duration = 0;
+    foreach ($usage_history as $usage_record) {
+      $usage_duration += ($usage_record['end'] - $usage_record['start'] + 1);
     }
 
-    return $is_complete;
+    return $plan_duration == $usage_duration;
   }
 
   /**
@@ -174,21 +200,22 @@ abstract class CommerceLicenseBillingUsageGroupBase implements CommerceLicenseBi
    *   The billing cycle entity.
    *
    * @return
-   *   An array of free quantity amounts, keyed by the plan's revision_id.
+   *   An array of arrays keyed by revision id, with the keys:
+   *   - quantity: The free quantity for this plan.
+   *   - start: The start timestamp of the plan.
+   *   - end: The end timestamp of the plan.
    */
   protected function freeQuantities(CommerceLicenseBillingCycle $billingCycle) {
     $free_quantities = array();
-    // Start with the free usage given by the current license revision.
-    $free_quantities[$this->license->revision_id] = $this->groupInfo['free_quantity'];
-    // Now get the free usage given by all other referenced revisions.
     $plan_history = commerce_license_billing_plan_history_list($this->license, $billingCycle);
     foreach ($plan_history as $history_record) {
-      if ($history_record['revision_id'] != $this->license->revision_id) {
-        $revision = entity_revision_load('commerce_license', $history_record['revision_id']);
-        $revision_usage_groups = $revision->usageGroups();
-        $revision_group_info = $revision_usage_groups[$this->groupName];
-        $free_quantities[$history_record['revision_id']] = $revision_group_info['free_quantity'];
-      }
+      $revision_usage_groups = $history_record['revision']->usageGroups();
+      $revision_group_info = $revision_usage_groups[$this->groupName];
+      $free_quantities[$history_record['revision_id']] = array(
+        'quantity' => $revision_group_info['free_quantity'],
+        'start' => $history_record['start'],
+        'end' => $history_record['end'],
+      );
     }
 
     return $free_quantities;
